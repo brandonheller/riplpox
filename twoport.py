@@ -16,9 +16,10 @@ def _handle_PacketIn(event):
   else:
     raise Exception("?")
   #msg = of.ofp_packet_out(data=event.data, in_port=of.OFPP_CONTROLLER)
-  # Note: w/ovs-openflowd, using OFPP_NONE or OFPP_CONTROLLER does not seem to 
-  # work, and results in an invalid argument error.
-  msg = of.ofp_packet_out(in_port=of.OFPP_CONTROLLER)
+  # Note: w/older ovs-openflowd, using OFPP_NONE or OFPP_CONTROLLER does
+  # not seem to work, and results in an invalid argument error.
+  # OFPP_NONE seems to work properly on more recent OVS versions like 1.4
+  msg = of.ofp_packet_out(in_port=of.OFPP_NONE)
   msg.actions.append(of.ofp_action_output(port = out_port, max_len = 0x2000))
   msg.buffer_id = event.ofp.buffer_id
   if not c:
