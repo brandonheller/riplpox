@@ -13,6 +13,8 @@ from util import buildTopo
 
 log = core.getLogger()
 
+# Number of bytes to send for packet_ins
+MISS_SEND_LEN = 2000
 
 # Borrowed from pox/forwarding/l2_multi
 class Switch (EventMixin):
@@ -64,6 +66,8 @@ class RipcordController(EventMixin):
   def __init__ (self, t):
     self.switches = {}  # Switches seen: [dpid] -> Switch
     self.t = t  # Master Topo object, passed in and never modified.
+    self.macTable = {}  # [mac] -> (dpid, port)
+
     # TODO: generalize all_switches_up to a more general state machine.
     self.all_switches_up = False  # Sequences event handling.
     self.listenTo(core.openflow, priority=0)
@@ -83,6 +87,8 @@ class RipcordController(EventMixin):
       #log.info("PacketIn: %s" % packet)
       in_port = event.port
       t = self.t
+  
+      #self.macTable[packet.src] = event.port # 1
   
       # Broadcast to every output port except the input on the input switch.
       # Hub behavior, baby!
@@ -122,6 +128,7 @@ class RipcordController(EventMixin):
     else:
       log.info("Odd - already saw switch %s come up" % sw_str)
       sw.connect(event.connection)
+    sw.connection.send(of.ofp_set_config(miss_send_len=MISS_SEND_LEN))
 
     if len(self.switches) == len(self.t.switches()):
       log.info("Woo!  All switches up")
