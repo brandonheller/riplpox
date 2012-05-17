@@ -1,0 +1,23 @@
+== Install ==
+
+See INSTALL for install first.
+
+== Running RipL on POX with Mininet ==
+
+RipL-POX must use the exact same topology as Mininet.  Order shouldn't matter.
+
+# Run POX
+cd ~/pox
+./pox.py riplpox.riplpox --topo=ft,4 --routing=random
+
+# Running Mininet w/a Fat Tree topology
+cd ~/ripl/ripl/
+sudo mn --custom mn.py --topo ft,4 --controller=remote --mac
+
+== Verifying the setup ==
+
+In mininet console:
+pingall
+iperf
+
+
