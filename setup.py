@@ -4,7 +4,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='ripcordpox',
+    name='rpox',
     version='0.0.0',
     description='A simple OpenFlow-based data center network controller',
     author='Brandon Heller',
