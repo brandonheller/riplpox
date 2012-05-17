@@ -9,12 +9,13 @@ from pox.lib.revent import EventMixin
 
 from ripcord.mn import topos
 
-from util import buildTopo
+from util import buildTopo, getRouting
 
 log = core.getLogger()
 
 # Number of bytes to send for packet_ins
 MISS_SEND_LEN = 2000
+
 
 # Borrowed from pox/forwarding/l2_multi
 class Switch (EventMixin):
@@ -46,15 +47,24 @@ class Switch (EventMixin):
     self._listeners = self.listenTo(connection)
 
   def send_packet_data(self, outport, data = None):
-      msg = of.ofp_packet_out(in_port=of.OFPP_NONE, data = data)
-      msg.actions.append(of.ofp_action_output(port = outport))
-      self.connection.send(msg)
+    msg = of.ofp_packet_out(in_port=of.OFPP_NONE, data = data)
+    msg.actions.append(of.ofp_action_output(port = outport))
+    self.connection.send(msg)
 
   def send_packet_bufid(self, outport, buffer_id = -1):
-      msg = of.ofp_packet_out(in_port=of.OFPP_NONE)
-      msg.actions.append(of.ofp_action_output(port = outport))
-      msg.buffer_id = buffer_id
-      self.connection.send(msg)
+    msg = of.ofp_packet_out(in_port=of.OFPP_NONE)
+    msg.actions.append(of.ofp_action_output(port = outport))
+    msg.buffer_id = buffer_id
+    self.connection.send(msg)
+
+  def install(self, port, match, buf = -1):
+    msg = of.ofp_flow_mod()
+    msg.match = match
+    msg.idle_timeout = 10
+    msg.hard_timeout = 30
+    msg.actions.append(of.ofp_action_output(port = port))
+    msg.buffer_id = buf
+    self.connection.send(msg)
 
   def _handle_ConnectionDown (self, event):
     self.disconnect()
@@ -63,9 +73,10 @@ class Switch (EventMixin):
 
 class RipcordController(EventMixin):
 
-  def __init__ (self, t):
+  def __init__ (self, t, r):
     self.switches = {}  # Switches seen: [dpid] -> Switch
     self.t = t  # Master Topo object, passed in and never modified.
+    self.r = r  # Master Routing object, passed in and reused.
     self.macTable = {}  # [mac] -> (dpid, port)
 
     # TODO: generalize all_switches_up to a more general state machine.
@@ -75,6 +86,22 @@ class RipcordController(EventMixin):
   def _raw_dpids(self, arr):
     "Convert a list of name strings (from Topo object) to numbers."
     return [self.t.id_gen(name = a).dpid for a in arr]
+
+  def _install_path(self, event, out_dpid, final_out_port, packet):
+    "Install entries on route between two switches."
+    in_name = self.t.id_gen(dpid = event.dpid).name_str()
+    out_name = self.t.id_gen(dpid = out_dpid).name_str()
+    route = self.r.get_route(in_name, out_name)
+    log.info("route: %s" % route)
+    match = of.ofp_match.from_packet(packet)
+    for i, node in enumerate(route):
+      node_dpid = self.t.id_gen(name = node).dpid
+      if i < len(route) - 1:
+        next_node = route[i + 1]
+        out_port, next_in_port = self.t.port(node, next_node)
+      else:
+        out_port = final_out_port
+      self.switches[node_dpid].install(out_port, match)
 
   def _handle_PacketIn(self, event):
     #log.info("Parsing PacketIn.")
@@ -93,9 +120,11 @@ class RipcordController(EventMixin):
   
       #log.info("mactable: %s" % self.macTable)
   
-      # Deliver packet directly to destination.
+      # Insert flow, deliver packet directly to destination.
       if packet.dst in self.macTable:
         out_dpid, out_port = self.macTable[packet.dst]
+        self._install_path(event, out_dpid, out_port, packet)
+
         #log.info("sending to entry in mactable: %s %s" % (out_dpid, out_port))
         self.switches[out_dpid].send_packet_data(out_port, event.data)
 
@@ -145,7 +174,7 @@ class RipcordController(EventMixin):
       self.all_switches_up = True
 
 
-def launch(topo = None):
+def launch(topo = None, routing = None):
   """
   Args in format toponame,arg1,arg2,...
   """
@@ -154,7 +183,8 @@ def launch(topo = None):
     raise Exception("please specify topo and args on cmd line")
   else:
     t = buildTopo(topo, topos)
+    r = getRouting(routing, t)
 
-  core.registerNew(RipcordController, t)
+  core.registerNew(RipcordController, t, r)
 
   log.info("Ripcord running with topo=%s." % topo)

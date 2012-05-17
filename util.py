@@ -2,6 +2,10 @@
 
 from mininet.util import makeNumeric
 
+from ripcord.routing import STStructuredRouting, RandomStructuredRouting
+from ripcord.routing import HashedStructuredRouting
+
+
 # TODO: this code is duplicated from mininet/bin/mn, except for TOPOS/topos.
 # To fix, extract into a library and make mininet an rpox dependency, or
 # extract the topo stuff itself out and make both depend on that shared 
@@ -24,3 +28,20 @@ def buildTopo( topo, topos ):
     if topo_name not in topos.keys():
         raise Exception( 'Invalid topo_name %s' % topo_name )
     return topos[ topo_name ]( *topo_seq_params, **topo_kw_params )
+
+
+DEF_ROUTING = 'st'
+ROUTING = {
+    'st': STStructuredRouting,
+    'random': RandomStructuredRouting,
+    'hashed': HashedStructuredRouting
+}
+
+def getRouting( routing_type, topo ):
+    "Return Ripcord Routing object given a type and a Topo object"
+    if routing_type == None:
+        routing_type = DEF_ROUTING
+    if routing_type not in ROUTING:
+        raise Exception("unknown routing type %s not in %s" % (routing_type, 
+                                                               ROUTING.keys())) 
+    return ROUTING[routing_type](topo)
