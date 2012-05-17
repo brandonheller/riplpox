@@ -5,13 +5,13 @@ RipL, POX, and setuptools are the dependencies.
 
 # Build RipL:
 sudo apt-get install -y python-setuptools
-git clone gi://github.com/brandonh/ripl.git
+git clone git://github.com/brandonheller/ripl.git
 cd ripl
 sudo python setup.py develop
 
 # Building Ripcord-POX
 cd ~/
-git clone git://github.com/brandonh/riplpox.git
+git clone git://github.com/brandonheller/riplpox.git
 cd riplpox
 sudo python setup.py develop
 
