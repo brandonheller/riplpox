@@ -2,8 +2,8 @@
 
 from mininet.util import makeNumeric
 
-from ripcord.routing import STStructuredRouting, RandomStructuredRouting
-from ripcord.routing import HashedStructuredRouting
+from ripl.routing import STStructuredRouting, RandomStructuredRouting
+from ripl.routing import HashedStructuredRouting
 
 
 # TODO: this code is duplicated from mininet/bin/mn, except for TOPOS/topos.
@@ -38,7 +38,7 @@ ROUTING = {
 }
 
 def getRouting( routing_type, topo ):
-    "Return Ripcord Routing object given a type and a Topo object"
+    "Return Ripl Routing object given a type and a Topo object"
     if routing_type == None:
         routing_type = DEF_ROUTING
     if routing_type not in ROUTING:

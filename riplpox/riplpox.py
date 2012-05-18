@@ -1,5 +1,5 @@
 """
-Ripcord+POX.  As simple a data center controller as possible.
+RipL+POX.  As simple a data center controller as possible.
 """
 
 from pox.core import core
@@ -7,7 +7,7 @@ from pox.lib.util import dpidToStr
 import pox.openflow.libopenflow_01 as of
 from pox.lib.revent import EventMixin
 
-from ripcord.mn import topos
+from ripl.mn import topos
 
 from util import buildTopo, getRouting
 
@@ -71,7 +71,7 @@ class Switch (EventMixin):
     pass
 
 
-class RipcordController(EventMixin):
+class RipLController(EventMixin):
 
   def __init__ (self, t, r):
     self.switches = {}  # Switches seen: [dpid] -> Switch
@@ -185,6 +185,6 @@ def launch(topo = None, routing = None):
     t = buildTopo(topo, topos)
     r = getRouting(routing, t)
 
-  core.registerNew(RipcordController, t, r)
+  core.registerNew(RipLController, t, r)
 
-  log.info("Ripcord running with topo=%s." % topo)
+  log.info("RipL-POX running with topo=%s." % topo)
