@@ -61,7 +61,7 @@ class Switch (EventMixin):
     msg = of.ofp_flow_mod()
     msg.match = match
     msg.idle_timeout = 10
-    msg.hard_timeout = 30
+    msg.hard_timeout = 0
     msg.actions.append(of.ofp_action_output(port = port))
     msg.buffer_id = buf
     self.connection.send(msg)
