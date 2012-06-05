@@ -2,11 +2,18 @@
 RipL+POX.  As simple a data center controller as possible.
 """
 
+import logging
+from struct import pack
+from zlib import crc32
+
 from pox.core import core
 from pox.lib.util import dpidToStr
 import pox.openflow.libopenflow_01 as of
 from pox.lib.revent import EventMixin
 from pox.lib.addresses import EthAddr
+from pox.lib.packet.ipv4 import ipv4
+from pox.lib.packet.udp import udp
+from pox.lib.packet.tcp import tcp
 
 from ripl.mn import topos
 
@@ -92,11 +99,27 @@ class RipLController(EventMixin):
     "Convert a list of name strings (from Topo object) to numbers."
     return [self.t.id_gen(name = a).dpid for a in arr]
 
-  def _install_packet_path(self, event, out_dpid, final_out_port, packet):
+  def _ecmp_hash(self, packet):
+    "Return an ECMP-style 5-tuple hash for TCP/IP packets, otherwise 0."
+    hash_input = [0] * 5
+    if isinstance(packet.next, ipv4):
+      ip = packet.next
+      hash_input[0] = ip.srcip.toUnsigned()
+      hash_input[1] = ip.dstip.toUnsigned()
+      hash_input[2] = ip.protocol
+      if isinstance(ip.next, tcp) or isinstance(ip.next, udp):
+        l4 = ip.next
+        hash_input[3] = l4.srcport
+        hash_input[4] = l4.dstport
+        return crc32(pack('LLHHH', *hash_input))
+    return 0
+
+  def _install_reactive_path(self, event, out_dpid, final_out_port, packet):
     "Install entries on route between two switches."
     in_name = self.t.id_gen(dpid = event.dpid).name_str()
     out_name = self.t.id_gen(dpid = out_dpid).name_str()
-    route = self.r.get_route(in_name, out_name)
+    hash_ = self._ecmp_hash(packet)
+    route = self.r.get_route(in_name, out_name, hash_)
     log.info("route: %s" % route)
     match = of.ofp_match.from_packet(packet)
     for i, node in enumerate(route):
@@ -107,6 +130,10 @@ class RipLController(EventMixin):
       else:
         out_port = final_out_port
       self.switches[node_dpid].install(out_port, match, idle_timeout = 10)
+
+  def _src_dst_hash(self, src_dpid, dst_dpid):
+    "Return a hash based on src and dst dpids."
+    return crc32(pack('QQ', src_dpid, dst_dpid))
 
   def _install_proactive_path(self, src, dst):
     """Install entries on route between two hosts based on MAC addrs.
@@ -119,7 +146,8 @@ class RipLController(EventMixin):
     dst_sw = self.t.up_nodes(self.t.id_gen(dpid = dst).name_str())
     assert len(dst_sw) == 1
     dst_sw_name = dst_sw[0]
-    route = self.r.get_route(src_sw_name, dst_sw_name)
+    hash_ = self._src_dst_hash(src_dpid, dst_dpid)
+    route = self.r.get_route(src_sw_name, dst_sw_name, hash_)
     log.info("route: %s" % route)
 
     # Form OF match
@@ -181,7 +209,7 @@ class RipLController(EventMixin):
     # Insert flow, deliver packet directly to destination.
     if packet.dst in self.macTable:
       out_dpid, out_port = self.macTable[packet.dst]
-      self._install_packet_path(event, out_dpid, out_port, packet)
+      self._install_reactive_path(event, out_dpid, out_port, packet)
 
       #log.info("sending to entry in mactable: %s %s" % (out_dpid, out_port))
       self.switches[out_dpid].send_packet_data(out_port, event.data)
