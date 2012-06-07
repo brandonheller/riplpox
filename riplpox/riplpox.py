@@ -6,6 +6,7 @@ from pox.core import core
 from pox.lib.util import dpidToStr
 import pox.openflow.libopenflow_01 as of
 from pox.lib.revent import EventMixin
+from pox.lib.addresses import EthAddr
 
 from ripl.mn import topos
 
@@ -15,6 +16,9 @@ log = core.getLogger()
 
 # Number of bytes to send for packet_ins
 MISS_SEND_LEN = 2000
+
+MODES = ['reactive', 'proactive']
+DEF_MODE = MODES[0]
 
 
 # Borrowed from pox/forwarding/l2_multi
@@ -57,11 +61,11 @@ class Switch (EventMixin):
     msg.buffer_id = buffer_id
     self.connection.send(msg)
 
-  def install(self, port, match, buf = -1):
+  def install(self, port, match, buf = -1, idle_timeout = 0, hard_timeout = 0):
     msg = of.ofp_flow_mod()
     msg.match = match
-    msg.idle_timeout = 10
-    msg.hard_timeout = 0
+    msg.idle_timeout = idle_timeout
+    msg.hard_timeout = hard_timeout
     msg.actions.append(of.ofp_action_output(port = port))
     msg.buffer_id = buf
     self.connection.send(msg)
@@ -73,10 +77,11 @@ class Switch (EventMixin):
 
 class RipLController(EventMixin):
 
-  def __init__ (self, t, r):
+  def __init__ (self, t, r, mode):
     self.switches = {}  # Switches seen: [dpid] -> Switch
     self.t = t  # Master Topo object, passed in and never modified.
     self.r = r  # Master Routing object, passed in and reused.
+    self.mode = mode # One in MODES.
     self.macTable = {}  # [mac] -> (dpid, port)
 
     # TODO: generalize all_switches_up to a more general state machine.
@@ -87,7 +92,7 @@ class RipLController(EventMixin):
     "Convert a list of name strings (from Topo object) to numbers."
     return [self.t.id_gen(name = a).dpid for a in arr]
 
-  def _install_path(self, event, out_dpid, final_out_port, packet):
+  def _install_packet_path(self, event, out_dpid, final_out_port, packet):
     "Install entries on route between two switches."
     in_name = self.t.id_gen(dpid = event.dpid).name_str()
     out_name = self.t.id_gen(dpid = out_dpid).name_str()
@@ -101,7 +106,101 @@ class RipLController(EventMixin):
         out_port, next_in_port = self.t.port(node, next_node)
       else:
         out_port = final_out_port
+      self.switches[node_dpid].install(out_port, match, idle_timeout = 10)
+
+  def _install_proactive_path(self, src, dst):
+    """Install entries on route between two hosts based on MAC addrs.
+    
+    src and dst are unsigned ints.
+    """
+    src_sw = self.t.up_nodes(self.t.id_gen(dpid = src).name_str())
+    assert len(src_sw) == 1
+    src_sw_name = src_sw[0]
+    dst_sw = self.t.up_nodes(self.t.id_gen(dpid = dst).name_str())
+    assert len(dst_sw) == 1
+    dst_sw_name = dst_sw[0]
+    route = self.r.get_route(src_sw_name, dst_sw_name)
+    log.info("route: %s" % route)
+
+    # Form OF match
+    match = of.ofp_match()
+    match.dl_src = EthAddr(src).toRaw()
+    match.dl_dst = EthAddr(dst).toRaw()
+
+    dst_host_name = self.t.id_gen(dpid = dst).name_str()
+    final_out_port, ignore = self.t.port(route[-1], dst_host_name)
+    for i, node in enumerate(route):
+      node_dpid = self.t.id_gen(name = node).dpid
+      if i < len(route) - 1:
+        next_node = route[i + 1]
+        out_port, next_in_port = self.t.port(node, next_node)
+      else:
+        out_port = final_out_port
       self.switches[node_dpid].install(out_port, match)
+
+  def _flood(self, event):
+    packet = event.parsed
+    dpid = event.dpid
+    #log.info("PacketIn: %s" % packet)
+    in_port = event.port
+    t = self.t
+
+    # Broadcast to every output port except the input on the input switch.
+    # Hub behavior, baby!
+    for sw in self._raw_dpids(t.layer_nodes(t.LAYER_EDGE)):
+      #log.info("considering sw %s" % sw)
+      ports = []
+      sw_name = t.id_gen(dpid = sw).name_str()
+      for host in t.down_nodes(sw_name):
+        sw_port, host_port = t.port(sw_name, host)
+        if sw != dpid or (sw == dpid and in_port != sw_port):
+          ports.append(sw_port)
+      # Send packet out each non-input host port
+      # TODO: send one packet only.
+      for port in ports:
+        #log.info("sending to port %s on switch %s" % (port, sw))
+        #buffer_id = event.ofp.buffer_id
+        #if sw == dpid:
+        #  self.switches[sw].send_packet_bufid(port, event.ofp.buffer_id)
+        #else:
+        self.switches[sw].send_packet_data(port, event.data)
+        #  buffer_id = -1
+
+  def _handle_packet_reactive(self, event):
+    packet = event.parsed
+    dpid = event.dpid
+    #log.info("PacketIn: %s" % packet)
+    in_port = event.port
+    t = self.t
+
+    # Learn MAC address of the sender on every packet-in.
+    self.macTable[packet.src] = (dpid, in_port)
+
+    #log.info("mactable: %s" % self.macTable)
+
+    # Insert flow, deliver packet directly to destination.
+    if packet.dst in self.macTable:
+      out_dpid, out_port = self.macTable[packet.dst]
+      self._install_packet_path(event, out_dpid, out_port, packet)
+
+      #log.info("sending to entry in mactable: %s %s" % (out_dpid, out_port))
+      self.switches[out_dpid].send_packet_data(out_port, event.data)
+
+    else:
+      self._flood(event)
+
+  def _handle_packet_proactive(self, event):
+    packet = event.parse()
+
+    if packet.dst.isMulticast():
+      self._flood(event)
+    else:
+      hosts = self._raw_dpids(self.t.layer_nodes(self.t.LAYER_HOST))
+      if packet.src.toInt() not in hosts:
+        raise Exception("unrecognized src: %s" % packet.src)
+      if packet.dst.toInt() not in hosts:
+        raise Exception("unrecognized dst: %s" % packet.dst)
+      raise Exception("known host MACs but entries weren't pushed down?!?")
 
   def _handle_PacketIn(self, event):
     #log.info("Parsing PacketIn.")
@@ -109,46 +208,17 @@ class RipLController(EventMixin):
       log.info("Saw PacketIn before all switches were up - ignoring.")
       return
     else:
-      packet = event.parsed
-      dpid = event.dpid
-      #log.info("PacketIn: %s" % packet)
-      in_port = event.port
-      t = self.t
+      if self.mode == 'reactive':
+        self._handle_packet_reactive(event)
+      elif self.mode == 'proactive':
+        self._handle_packet_proactive(event)
 
-      # Learn MAC address of the sender on every packet-in.
-      self.macTable[packet.src] = (dpid, in_port)
-  
-      #log.info("mactable: %s" % self.macTable)
-  
-      # Insert flow, deliver packet directly to destination.
-      if packet.dst in self.macTable:
-        out_dpid, out_port = self.macTable[packet.dst]
-        self._install_path(event, out_dpid, out_port, packet)
-
-        #log.info("sending to entry in mactable: %s %s" % (out_dpid, out_port))
-        self.switches[out_dpid].send_packet_data(out_port, event.data)
-
-      else:
-        # Broadcast to every output port except the input on the input switch.
-        # Hub behavior, baby!
-        for sw in self._raw_dpids(t.layer_nodes(t.LAYER_EDGE)):
-          #log.info("considering sw %s" % sw)
-          ports = []
-          sw_name = t.id_gen(dpid = sw).name_str()
-          for host in t.down_nodes(sw_name):
-            sw_port, host_port = t.port(sw_name, host)
-            if sw != dpid or (sw == dpid and in_port != sw_port):
-              ports.append(sw_port)
-          # Send packet out each non-input host port
-          # TODO: send one packet only.
-          for port in ports:
-            #log.info("sending to port %s on switch %s" % (port, sw))
-            #buffer_id = event.ofp.buffer_id
-            #if sw == dpid:
-            #  self.switches[sw].send_packet_bufid(port, event.ofp.buffer_id)
-            #else:
-            self.switches[sw].send_packet_data(port, event.data)
-            #  buffer_id = -1
+  def _install_proactive_flows(self):
+    t = self.t
+    # Install L2 src/dst flow for every possible pair of hosts.
+    for src in sorted(self._raw_dpids(t.layer_nodes(t.LAYER_HOST))):
+      for dst in sorted(self._raw_dpids(t.layer_nodes(t.LAYER_HOST))):
+        self._install_proactive_path(src, dst)
 
 
   def _handle_ConnectionUp (self, event):
@@ -172,12 +242,16 @@ class RipLController(EventMixin):
     if len(self.switches) == len(self.t.switches()):
       log.info("Woo!  All switches up")
       self.all_switches_up = True
+      if self.mode == 'proactive':
+        self._install_proactive_flows()
 
 
-def launch(topo = None, routing = None):
+def launch(topo = None, routing = None, mode = None):
   """
   Args in format toponame,arg1,arg2,...
   """
+  if not mode:
+    mode = DEF_MODE
   # Instantiate a topo object from the passed-in file.
   if not topo:
     raise Exception("please specify topo and args on cmd line")
@@ -185,6 +259,6 @@ def launch(topo = None, routing = None):
     t = buildTopo(topo, topos)
     r = getRouting(routing, t)
 
-  core.registerNew(RipLController, t, r)
+  core.registerNew(RipLController, t, r, mode)
 
   log.info("RipL-POX running with topo=%s." % topo)

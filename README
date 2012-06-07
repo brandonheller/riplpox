@@ -10,9 +10,9 @@ RipL-POX must use the exact same topology as Mininet.  Order shouldn't matter, b
 cd ~/
 sudo mn --custom ~/ripl/ripl/mn.py --topo ft,4 --controller=remote --mac
 
-# Run POX
+# Run POX in reactive mode (one option)
 cd ~/
-~/pox/pox.py riplpox.riplpox --topo=ft,4 --routing=random
+~/pox/pox.py riplpox.riplpox --topo=ft,4 --routing=random --mode=reactive
 
 == Verifying the setup ==
 
