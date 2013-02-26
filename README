@@ -1,3 +1,22 @@
+== What is it? ==
+
+RipL-POX (Ripcord-Lite for POX) is a simple data center controller built on RipL.
+
+== Why should you use it ==
+
+RipL-POX provides an example of an OpenFlow controller that uses a static network description to create paths. 
+It should work out-of-the-box to give you a functioning (but unoptimized) OpenFlow 1.0 data center controller based on a topology description from RipL.
+
+There are two main modes:
+- Proactive routing pushes down all possible paths when all switches come up.
+- Reactive routing pushes down full OpenFlow N-tuple paths for each flow.
+
+For each mode, you can choose to use spanning tree routing, random routing, or routing based on a hash function.
+
+The hash function depends on the mode:
+- In proactive mode, hashing is based on L2 fields.
+- In reactive mode, hashing comes from the ECMP 5-tuple.
+
 == Install ==
 
 See INSTALL for install first.
@@ -10,9 +29,21 @@ RipL-POX must use the exact same topology as Mininet.  Order shouldn't matter, b
 cd ~/
 sudo mn --custom ~/ripl/ripl/mn.py --topo ft,4 --controller=remote --mac
 
-# Run POX in reactive mode (one option)
+# Run RipL-POX in reactive mode w/random routing
 cd ~/
 ~/pox/pox.py riplpox.riplpox --topo=ft,4 --routing=random --mode=reactive
+
+That's it - at this point, your network should run.
+
+Here are other invocation examples:
+
+# Run RipL-POX in reactive mode w/hashed routing
+cd ~/
+~/pox/pox.py riplpox.riplpox --topo=ft,4 --routing=hashed --mode=reactive
+
+# Run RipL-POX in proactive mode w/spanning-tree routing
+cd ~/
+~/pox/pox.py riplpox.riplpox --topo=ft,4 --routing=st --mode=proactive
 
 == Verifying the setup ==
 
