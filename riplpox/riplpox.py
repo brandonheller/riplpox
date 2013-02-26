@@ -146,7 +146,7 @@ class RipLController(EventMixin):
     dst_sw = self.t.up_nodes(self.t.id_gen(dpid = dst).name_str())
     assert len(dst_sw) == 1
     dst_sw_name = dst_sw[0]
-    hash_ = self._src_dst_hash(src_dpid, dst_dpid)
+    hash_ = self._src_dst_hash(src, dst)
     route = self.r.get_route(src_sw_name, dst_sw_name, hash_)
     log.info("route: %s" % route)
 
