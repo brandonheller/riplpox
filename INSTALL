@@ -10,6 +10,7 @@ The invocation examples assume that POX available in ~/.
 # Add POX at tested version:
 cd ~/
 git clone git://github.com/noxrepo/pox
+cd pox
 git checkout 0a1bbb8
 
 # Build RipL:
