@@ -27,6 +27,8 @@ MISS_SEND_LEN = 2000
 MODES = ['reactive', 'proactive']
 DEF_MODE = MODES[0]
 
+IDLE_TIMEOUT = 10
+
 
 # Borrowed from pox/forwarding/l2_multi
 class Switch (EventMixin):
@@ -129,7 +131,8 @@ class RipLController(EventMixin):
         out_port, next_in_port = self.t.port(node, next_node)
       else:
         out_port = final_out_port
-      self.switches[node_dpid].install(out_port, match, idle_timeout = 10)
+      self.switches[node_dpid].install(out_port, match, idle_timeout =
+                                       IDLE_TIMEOUT)
 
   def _src_dst_hash(self, src_dpid, dst_dpid):
     "Return a hash based on src and dst dpids."
