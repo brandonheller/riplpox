@@ -3,6 +3,7 @@ RipL+POX.  As simple a data center controller as possible.
 """
 
 import logging
+import random
 from struct import pack
 from zlib import crc32
 
@@ -24,10 +25,17 @@ log = core.getLogger()
 # Number of bytes to send for packet_ins
 MISS_SEND_LEN = 2000
 
-MODES = ['reactive', 'proactive']
+MODES = ['reactive', 'proactive', 'hybrid']
 DEF_MODE = MODES[0]
 
 IDLE_TIMEOUT = 10
+
+HYBRID_IDLE_TIMEOUT = 0
+
+PRIO_HYBRID_FLOW_DOWN = 1000
+PRIO_HYBRID_VLAN_DOWN = 900
+PRIO_HYBRID_FLOW_UP = 500
+PRIO_HYBRID_VLAN_UP = 10
 
 
 # Borrowed from pox/forwarding/l2_multi
@@ -70,12 +78,26 @@ class Switch (EventMixin):
     msg.buffer_id = buffer_id
     self.connection.send(msg)
 
-  def install(self, port, match, buf = -1, idle_timeout = 0, hard_timeout = 0):
+  def install(self, port, match, buf = -1, idle_timeout = 0, hard_timeout = 0,
+              priority = of.OFP_DEFAULT_PRIORITY):
     msg = of.ofp_flow_mod()
     msg.match = match
     msg.idle_timeout = idle_timeout
     msg.hard_timeout = hard_timeout
+    msg.priority = priority
     msg.actions.append(of.ofp_action_output(port = port))
+    msg.buffer_id = buf
+    self.connection.send(msg)
+
+  def install_multiple(self, actions, match, buf = -1, idle_timeout = 0,
+                       hard_timeout = 0, priority = of.OFP_DEFAULT_PRIORITY):
+    msg = of.ofp_flow_mod()
+    msg.match = match
+    msg.idle_timeout = idle_timeout
+    msg.hard_timeout = hard_timeout
+    msg.priority = priority
+    for a in actions:
+      msg.actions.append(a)
     msg.buffer_id = buf
     self.connection.send(msg)
 
@@ -83,6 +105,9 @@ class Switch (EventMixin):
     self.disconnect()
     pass
 
+
+def sep():
+  log.info("************************************************")
 
 class RipLController(EventMixin):
 
@@ -233,6 +258,82 @@ class RipLController(EventMixin):
         raise Exception("unrecognized dst: %s" % packet.dst)
       raise Exception("known host MACs but entries weren't pushed down?!?")
 
+  # Get host index.
+  def dpid_port_to_host_index(self, dpid, port):
+    node = self.t.id_gen(dpid = dpid)
+    return node.pod * ((self.t.k ** 2) / 4) + node.sw * (self.t.k / 2) + ((port - 2) / 2)
+
+  def _install_hybrid_dynamic_flows(self, event, out_dpid, final_out_port, packet):
+    "Install entry at ingress switch."
+    in_name = self.t.id_gen(dpid = event.dpid).name_str()
+    #log.info("in_name: %s" % in_name) 
+    out_name = self.t.id_gen(dpid = out_dpid).name_str()
+    #log.info("out_name: %s" % out_name) 
+    hash_ = self._ecmp_hash(packet)
+    src_dst_route = self.r.get_route(in_name, out_name, hash_)
+    # Choose a random core switch.
+    core_sws = sorted(self._raw_dpids(self.t.layer_nodes(self.t.LAYER_CORE)))
+    core_sw = random.choice(core_sws)
+    core_sw_id = self.t.id_gen(dpid = core_sw)
+    core_sw_name = self.t.id_gen(dpid = core_sw).name_str()
+
+    route = self.r.get_route(in_name, core_sw_name, None)    
+    assert len(route) == 3
+    log.info("route: %s" % route)
+
+    match = of.ofp_match.from_packet(packet)
+
+    assert core_sw_id.pod == self.t.k
+    core_sw_index = ((core_sw_id.sw - 1) * 2) + (core_sw_id.host - 1)
+    #log.info("core_sw_index: %s" % core_sw_index)
+
+    dst_host_index = self.dpid_port_to_host_index(out_dpid, final_out_port)
+    #log.info("dst_host_index: %s" % dst_host_index) 
+
+    vlan = (dst_host_index << 2) + core_sw_index
+    log.info("vlan: %s" % vlan) 
+    log.info("len(src_dst_route): %i" % len(src_dst_route))
+
+    if len(src_dst_route) == 1:
+      # Don't bother with VLAN append; directly send to out port.
+      log.info("adding edge-only entry from %s to %s on sw %s" %
+               (match.dl_src, match.dl_dst, in_name))
+      self.switches[event.dpid].install(final_out_port, match, idle_timeout =
+                                     HYBRID_IDLE_TIMEOUT,
+                                     priority = PRIO_HYBRID_FLOW_DOWN)      
+    else:
+      # Write VLAN and send up
+      src_port, dst_port = self.t.port(route[0], route[1])
+      actions = [of.ofp_action_vlan_vid(vlan_vid = vlan),
+                 of.ofp_action_output(port = src_port)]
+      self.switches[event.dpid].install_multiple(actions, match, idle_timeout =
+                                              HYBRID_IDLE_TIMEOUT,
+                                              priority = PRIO_HYBRID_FLOW_UP)
+
+  def _handle_packet_hybrid(self, event):
+    packet = event.parsed
+    dpid = event.dpid
+    #log.info("PacketIn: %s" % packet)
+    in_port = event.port
+    t = self.t
+
+    # Learn MAC address of the sender on every packet-in.
+    self.macTable[packet.src] = (dpid, in_port)
+    #log.info("mactable: %s" % self.macTable)
+    #log.info("learned that %s is on dpid %s, port %s" % (packet.src, dpid, in_port))
+
+    # Insert flow, deliver packet directly to destination.
+    if packet.dst in self.macTable:
+      out_dpid, out_port = self.macTable[packet.dst]
+      log.info("found %s on dpid %s, port %s" % (packet.dst, out_dpid, out_port))      
+      self._install_hybrid_dynamic_flows(event, out_dpid, out_port, packet)
+
+      #log.info("sending to entry in mactable: %s %s" % (out_dpid, out_port))
+      self.switches[out_dpid].send_packet_data(out_port, event.data)
+
+    else:
+      self._flood(event)
+
   def _handle_PacketIn(self, event):
     #log.info("Parsing PacketIn.")
     if not self.all_switches_up:
@@ -243,6 +344,8 @@ class RipLController(EventMixin):
         self._handle_packet_reactive(event)
       elif self.mode == 'proactive':
         self._handle_packet_proactive(event)
+      elif self.mode == 'hybrid':
+        self._handle_packet_hybrid(event)
 
   def _install_proactive_flows(self):
     t = self.t
@@ -251,6 +354,126 @@ class RipLController(EventMixin):
       for dst in sorted(self._raw_dpids(t.layer_nodes(t.LAYER_HOST))):
         self._install_proactive_path(src, dst)
 
+  def _install_hybrid_static_flows(self):
+    t = self.t
+    hosts = sorted(self._raw_dpids(t.layer_nodes(t.LAYER_HOST)))
+    edge_sws = sorted(self._raw_dpids(t.layer_nodes(t.LAYER_EDGE)))
+    agg_sws = sorted(self._raw_dpids(t.layer_nodes(t.LAYER_AGG)))
+    core_sws = sorted(self._raw_dpids(t.layer_nodes(t.LAYER_CORE)))
+
+    # For each host, add entries to that host, from each core switch.
+    sep()
+    #log.info("***adding down entries from each core switch")
+    for host in hosts:
+      host_name = self.t.id_gen(dpid = host).name_str()
+      log.info("for host %i (%s)" % (host, host_name))
+      for core_sw in core_sws:
+        core_sw_name = self.t.id_gen(dpid = core_sw).name_str()
+        log.info("for core switch  %i (%s)" % (core_sw, core_sw_name))
+        route = self.r.get_route(host_name, core_sw_name, None)
+        assert route[0] == host_name
+        assert route[-1] == core_sw_name
+        # Form OF match
+        match = of.ofp_match()
+        # Highest-order four bits are host index
+        host_id = self.t.id_gen(dpid = host)
+        k = self.t.k
+        host_index = host_id.pod * k + (host_id.sw * k / 2) + (host_id.host - 2)
+        # Lowest-order two bits are core switch ID
+        core_sw_id = self.t.id_gen(dpid = core_sw)
+        log.info("core_sw_id: %s; sw: %i host: %i" % (core_sw, core_sw_id.sw, core_sw_id.host))
+        core_index = ((core_sw_id.sw - 1) * 2) + (core_sw_id.host - 1)
+        vlan = (host_index << 2) + core_index
+        #log.info("setting vlan to %i" % vlan)
+        match.dl_vlan = vlan
+        #log.info("vlan: %s" % match.dl_vlan)
+
+        # Add one flow entry for each element on the path pointing down, except host
+        for i, node in enumerate(route):  # names
+          if i == 0:
+            pass  # Don't install flow entries on hosts :-)
+          else:
+            # Install downward-facing entry
+            node_dpid = self.t.id_gen(name = node).dpid
+            node_below = route[i - 1]
+            src_port, dst_port = self.t.port(node, node_below)
+            log.info("adding entry from %s to %s via VLAN %i and port %i" %
+                     (node, node_below, match.dl_vlan, src_port))
+            if i == 1:
+              # Strip VLAN too
+              actions = [of.ofp_action_strip_vlan(),
+                         of.ofp_action_output(port = src_port)]
+              self.switches[node_dpid].install_multiple(actions, match,
+                                                        priority = PRIO_HYBRID_VLAN_DOWN)
+            elif i > 1:
+              self.switches[node_dpid].install(src_port, match, priority = PRIO_HYBRID_VLAN_DOWN)
+
+
+#    # Add one flow entry for each edge switch pointing up
+#    sep()
+#    log.info("***adding up entries from each edge switch")
+#    for edge_sw in edge_sws:  # DPIDs
+#      edge_sw_name = self.t.id_gen(dpid = edge_sw).name_str()
+#      log.info("for edge sw %i (%s)" % (edge_sw, edge_sw_name))
+#      for core_sw in core_sws:  # DPIDs
+#        core_sw_name = self.t.id_gen(dpid = core_sw).name_str()
+#        log.info("for core switch  %i (%s)" % (core_sw, core_sw_name))
+#
+#        route = self.r.get_route(edge_sw_name, core_sw_name, None)
+#        assert route[0] == edge_sw_name
+#        assert route[-1] == core_sw_name
+#
+#        # Form OF match
+#        match = of.ofp_match()
+#        # Highest-order four bits are host index
+#
+#        # Lowest-order two bits are core switch ID
+#        core_sw_id = self.t.id_gen(dpid = core_sw)
+#        core_index = (core_sw_id.sw - 1) * 2 + (core_sw_id.host - 1)
+#
+#        agg_sw_name = route[1]
+#        agg_sw = self.t.id_gen(name = agg_sw_name).dpid
+#
+#        for host_index in range((self.t.k ** 3) / 4):
+#          match.dl_vlan = (host_index << 2) + core_index
+#          #log.info("vlan: %s" % match.dl_vlan)
+#
+#          edge_port, agg_port = self.t.port(edge_sw_name, agg_sw_name)
+#          log.info("adding entry from %s to %s via VLAN %i and port %i" %
+#                   (edge_sw_name, agg_sw_name, match.dl_vlan, edge_port))
+#          self.switches[edge_sw].install(edge_port, match, 
+#                                         priority = PRIO_HYBRID_VLAN_UP)
+
+    # Add one flow entry for each agg switch pointing up
+    sep()
+    log.info("***adding up entries from each agg switch")
+    for agg_sw in agg_sws:  # DPIDs
+      agg_sw_name = self.t.id_gen(dpid = agg_sw).name_str()
+      log.info("for agg sw %i (%s)" % (agg_sw, agg_sw_name))
+      for core_sw in core_sws:  # DPIDs
+        core_sw_name = self.t.id_gen(dpid = core_sw).name_str()
+        log.info("for core switch  %i (%s)" % (core_sw, core_sw_name))
+        if agg_sw_name in self.t.g[core_sw_name]:
+            # If connected, add entry.
+            agg_port, core_port = self.t.port(agg_sw_name, core_sw_name)
+            
+            # Form OF match
+            match = of.ofp_match()
+            # Highest-order four bits are host index
+    
+            # Lowest-order two bits are core switch ID
+            core_sw_id = self.t.id_gen(dpid = core_sw)
+            core_index = (core_sw_id.sw - 1) * 2 + (core_sw_id.host - 1)
+    
+            for host_index in range((self.t.k ** 3) / 4):
+              match.dl_vlan = (host_index << 2) + core_index
+              #log.info("vlan: %s" % match.dl_vlan)
+
+              log.info("adding entry from %s to %s via VLAN %i and port %i" %
+                       (agg_sw_name, core_sw_name, match.dl_vlan, agg_port))
+              self.switches[agg_sw].install(agg_port, match,
+                                             priority = PRIO_HYBRID_VLAN_UP)
+      
 
   def _handle_ConnectionUp (self, event):
     sw = self.switches.get(event.dpid)
@@ -275,6 +498,8 @@ class RipLController(EventMixin):
       self.all_switches_up = True
       if self.mode == 'proactive':
         self._install_proactive_flows()
+      if self.mode == 'hybrid':
+        self._install_hybrid_static_flows()
 
 
 def launch(topo = None, routing = None, mode = None):
